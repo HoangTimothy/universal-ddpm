@@ -1081,7 +1081,11 @@ class Trainer:
                         with torch.inference_mode():
                             milestone = self.step // self.save_and_sample_every
                             batches = num_to_groups(self.num_samples, self.batch_size)
-                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
+                            all_images_list = []
+                            for n in batches:
+                                with self.accelerator.autocast():
+                                    imgs = self.ema.ema_model.sample(batch_size=n)
+                                all_images_list.append(imgs)
 
                         all_images = torch.cat(all_images_list, dim = 0)
 
