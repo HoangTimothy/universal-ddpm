@@ -11,6 +11,7 @@ from torch import nn, einsum
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 from torch.amp import autocast
+from contextlib import nullcontext
 from torch.utils.data import Dataset, DataLoader
 
 from torch.optim import Adam
@@ -688,10 +689,15 @@ class GaussianDiffusion(Module):
 
         x_start = None
 
-        for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
-            self_cond = x_start if self.self_condition else None
-            img, x_start = self.p_sample(img, t, self_cond)
-            imgs.append(img)
+        # enable autocast (fp16) for sampling to allow flash-attention kernels
+        use_autocast = torch.cuda.is_available()
+        autocast_ctx = autocast('cuda') if use_autocast else nullcontext()
+
+        with autocast_ctx:
+            for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
+                self_cond = x_start if self.self_condition else None
+                img, x_start = self.p_sample(img, t, self_cond)
+                imgs.append(img)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 
@@ -711,29 +717,34 @@ class GaussianDiffusion(Module):
 
         x_start = None
 
-        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
-            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
-            self_cond = x_start if self.self_condition else None
-            pred_noise, x_start, *_ = self.model_predictions(img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+        # enable autocast (fp16) for sampling to allow flash-attention kernels
+        use_autocast = torch.cuda.is_available()
+        autocast_ctx = autocast('cuda') if use_autocast else nullcontext()
 
-            if time_next < 0:
-                img = x_start
+        with autocast_ctx:
+            for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
+                time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
+                self_cond = x_start if self.self_condition else None
+                pred_noise, x_start, *_ = self.model_predictions(img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+
+                if time_next < 0:
+                    img = x_start
+                    imgs.append(img)
+                    continue
+
+                alpha = self.alphas_cumprod[time]
+                alpha_next = self.alphas_cumprod[time_next]
+
+                sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+                c = (1 - alpha_next - sigma ** 2).sqrt()
+
+                noise = torch.randn_like(img)
+
+                img = x_start * alpha_next.sqrt() + \
+                      c * pred_noise + \
+                      sigma * noise
+
                 imgs.append(img)
-                continue
-
-            alpha = self.alphas_cumprod[time]
-            alpha_next = self.alphas_cumprod[time_next]
-
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = (1 - alpha_next - sigma ** 2).sqrt()
-
-            noise = torch.randn_like(img)
-
-            img = x_start * alpha_next.sqrt() + \
-                  c * pred_noise + \
-                  sigma * noise
-
-            imgs.append(img)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 
@@ -999,7 +1010,7 @@ class Trainer:
                 use_ddim=fid_use_ddim,
                 ddim_steps=fid_ddim_steps,
             )
-            )
+        # saving only best and latest model based on FID)
 
         if save_best_and_latest_only:
             assert calculate_fid, "`calculate_fid` must be True to provide a means for model evaluation for `save_best_and_latest_only`."
