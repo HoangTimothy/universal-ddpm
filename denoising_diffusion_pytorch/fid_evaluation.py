@@ -31,6 +31,9 @@ class FIDEvaluation:
         device="cuda",
         num_fid_samples=50000,
         inception_block_idx=2048,
+        image_size=(128, 128),
+        use_ddim=False,
+        ddim_steps=50,
     ):
         self.batch_size = batch_size
         self.n_samples = num_fid_samples
@@ -44,6 +47,9 @@ class FIDEvaluation:
         block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[inception_block_idx]
         self.inception_v3 = InceptionV3([block_idx]).to(device)
         self.dataset_stats_loaded = False
+        self.image_size = image_size
+        self.use_ddim = use_ddim
+        self.ddim_steps = ddim_steps
 
     def calculate_inception_features(self, samples):
         if self.channels == 1:
@@ -98,8 +104,35 @@ class FIDEvaluation:
         self.print_fn(
             f"Stacking Inception features for {self.n_samples} generated samples."
         )
+        # prepare shape for sampling
+        (h, w) = self.image_size
         for batch in tqdm(batches):
-            fake_samples = self.sampler.sample(batch_size=batch)
+            # use DDIM sampling (fewer steps) if requested and available
+            if self.use_ddim and hasattr(self.sampler, 'ddim_sample'):
+                # optionally override sampling timesteps temporarily
+                old_steps = getattr(self.sampler, 'sampling_timesteps', None)
+                try:
+                    if self.ddim_steps is not None:
+                        self.sampler.sampling_timesteps = self.ddim_steps
+                    # ensure autocast for fp16 kernels when on cuda
+                    if torch.cuda.is_available():
+                        from torch.cuda.amp import autocast
+                        with autocast():
+                            fake_samples = self.sampler.ddim_sample((batch, self.channels, h, w))
+                    else:
+                        fake_samples = self.sampler.ddim_sample((batch, self.channels, h, w))
+                finally:
+                    if old_steps is not None:
+                        self.sampler.sampling_timesteps = old_steps
+            else:
+                # default sampling (may be slower)
+                if torch.cuda.is_available():
+                    from torch.cuda.amp import autocast
+                    with autocast():
+                        fake_samples = self.sampler.sample(batch_size=batch)
+                else:
+                    fake_samples = self.sampler.sample(batch_size=batch)
+
             fake_features = self.calculate_inception_features(fake_samples)
             stacked_fake_features.append(fake_features)
         stacked_fake_features = torch.cat(stacked_fake_features, dim=0).cpu().numpy()

@@ -899,6 +899,8 @@ class Trainer:
         convert_image_to = None,
         calculate_fid = True,
         inception_block_idx = 2048,
+        fid_use_ddim = False,
+        fid_ddim_steps = 50,
         max_grad_norm = 1.,
         num_fid_samples = 50000,
         save_best_and_latest_only = False
@@ -992,7 +994,11 @@ class Trainer:
                 stats_dir=results_folder,
                 device=self.device,
                 num_fid_samples=num_fid_samples,
-                inception_block_idx=inception_block_idx
+                inception_block_idx=inception_block_idx,
+                image_size=self.image_size,
+                use_ddim=fid_use_ddim,
+                ddim_steps=fid_ddim_steps,
+            )
             )
 
         if save_best_and_latest_only:
